@@ -24,9 +24,10 @@ describe("#list() method", function() {
       console.log(`DEBUG: ${s}`);
     }
   };
-  let client = new Client();
+  let client;
 
   before("setup hook", async function() {
+    client = new Client();
     await client.connect(config);
   });
 
