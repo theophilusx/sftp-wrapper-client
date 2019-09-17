@@ -19,10 +19,7 @@ describe("#connect() and #end() return a promise", function() {
   let config = {
     host: process.env.SFTP_SERVER,
     username: process.env.SFTP_USER,
-    password: process.env.SFTP_PASSWORD,
-    debug: str => {
-      console.debug(str);
-    }
+    password: process.env.SFTP_PASSWORD
   };
   let client = new Client();
 
