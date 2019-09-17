@@ -12,6 +12,50 @@
 // by ssh2-sftp-client are missing or slightly different (see below).
 
 const pty = require("node-pty");
+const moment = require("moment");
+
+const garbage = /No entry for terminal type "sftp";|using dumb terminal settings./gi;
+const prompt = /sftp> $/;
+const pwd = /password: $/;
+const months = {
+  Jan: 1,
+  Fed: 2,
+  Mar: 3,
+  Apr: 4,
+  May: 5,
+  Jun: 6,
+  Jul: 7,
+  Aug: 8,
+  Sep: 9,
+  Oct: 10,
+  Nov: 11,
+  Dec: 12
+};
+
+function makeTimestamp(month, day, timeOrYear) {
+  try {
+    let year = moment().format("YYYY");
+    let time = `${timeOrYear}:00`;
+    if (timeOrYear.indexOf(":") === -1) {
+      // timeOrYear is year
+      year = timeOrYear;
+      time = "00:00:00";
+    } else if (parseInt(moment().format("MM") < months[month])) {
+      year = parseInt(moment().format("YYYY")) - 1;
+    }
+    if (parseInt(months[month]) < 10) {
+      month = `0${months[month]}`;
+    } else {
+      month = months[month];
+    }
+    if (parseInt(day) < 10) {
+      day = `0${day}`;
+    }
+    return moment(`${year}-${month}-${day}T${time}Z`);
+  } catch (err) {
+    throw new Error(`makeTimestamp: ${err.message}`);
+  }
+}
 
 class Client {
   constructor() {
@@ -21,28 +65,35 @@ class Client {
     this._collector = "";
   }
 
-  _collectData(data) {
-    let logName = "_collectData";
-
-    this.maybeDebug(`${logName}: Got ${data}`);
-    if (data.match(/password: $/)) {
-      this.maybeDebug(`${logName}: Got password prompt ${data}`);
-      this.sftp.emit("password");
-    } else if (data.match(/sftp> $/)) {
-      this._collector += data;
-      this.maybeDebug(`${logName}: Got prompt ${data}`);
-      let newData = this._collector.split("\r");
-      this._collector = "";
-      this.maybeDebug(`${logName}: ${newData}`);
-      this.sftp.emit("response", newData);
-    } else {
-      this._collector += data;
-    }
-  }
-
   maybeDebug(msg) {
     if (this.debug) {
       this.debug(msg);
+    }
+  }
+
+  _collectData(data) {
+    let name = "collectData";
+
+    // this.maybeDebug(`${logName}: Got ${data}`);
+    if (data.match(pwd)) {
+      this.maybeDebug(`${name}: found password prompt - emitting`);
+      this.sftp.emit("password");
+    } else {
+      this._collector += data;
+      if (this._collector.match(prompt)) {
+        this.maybeDebug(`${name}: Got prompt`);
+        let newData = this._collector
+          .replace(garbage, "")
+          .replace(/sftp>/, "")
+          .split("\r\n")
+          .filter(l => l.length && !l.match(/^ +$/) && !l.match(/^sftp> /));
+        this._collector = "";
+        this.maybeDebug(
+          `${name}: returning ${JSON.stringify(newData, null, " ")}`
+        );
+        this.maybeDebug("----");
+        this.sftp.emit("response", newData);
+      }
     }
   }
 
@@ -68,6 +119,12 @@ class Client {
   //   retry_minTimeout: 2000 // ignored
   // };
 
+  /**
+   * Open an sftp connection to remote server
+   *
+   * @param {object} config - config values
+   * @returns {Promise}
+   */
   connect(config) {
     let _self = this;
 
@@ -116,23 +173,25 @@ class Client {
 
         _self.maybeDebug(`Args: ${JSON.stringify(args)}`);
 
-        _self.sftp = pty.spawn("sftp", args, {
+        let env = process.env;
+        // env.TERM = "xterm";
+        _self.sftp = pty.spawn("/usr/bin/sftp", args, {
           name: "sftp",
           cols: 80,
           rows: 30,
           cwd: __dirname,
-          env: process.env
+          env: env
         });
 
         _self.sftp.on("error", err => {
           _self.maybeDebug(`Error Listener: ${err.message}`);
-          throw err;
+          throw new Error(err.message);
         });
 
         _self.sftp.on("exit", (code, signal) => {
           _self.maybeDebug(`exit event: code = ${code} signal: ${signal}`);
           if (code !== 0) {
-            console.error(`sftp client existed with error code ${code}`);
+            //console.error(`sftp client existed with error code ${code}`);
             throw new Error(
               `Existed with error code ${code} after signal ${signal}`
             );
@@ -161,23 +220,74 @@ class Client {
     });
   }
 
+  /**
+   * Closes the sftp connection
+   *
+   * @returns {Promise}
+   */
   end() {
     let _self = this;
 
     return new Promise((resolve, reject) => {
       try {
         if (_self.sftp) {
-          _self.sftp.on("exit", (code, signal) => {
-            resolve(`Exit code: ${code} Signal: ${signal}`);
-            _self.sftp.destroy();
-          });
-          _self.sftp.write("exit\r");
-          //_self.sftp.destroy();
-        } else {
-          resolve(true);
+          _self.sftp.write("exit \n");
         }
+        resolve(true);
       } catch (err) {
         reject(err);
+      }
+    });
+  }
+
+  /**
+   * Returns an array of objects representing the output from ls -l on
+   * remote server
+   *
+   * @param {string} path - remote path
+   * @returns {Promise} resolves to array of objects
+   */
+  list(path) {
+    let _self = this;
+    const notFound = /Can't ls: .* not found/;
+    return new Promise((resolve, reject) => {
+      try {
+        if (_self.sftp) {
+          _self.sftp.on("response", res => {
+            if (res.filter(l => l.match(notFound)).length) {
+              return reject(`${path} not found`);
+            }
+            let listing = res.reduce((acc, v) => {
+              if (v.match(/ls -l/)) {
+                return acc;
+              }
+              let elements = v.split(/ +/);
+              let mTime = makeTimestamp(elements[5], elements[6], elements[7]);
+              let entry = {
+                type: elements[0].substring(0, 1),
+                rights: {
+                  user: elements[0].substring(1, 4).replace(/-/gi, ""),
+                  group: elements[0].substring(4, 7).replace(/-/gi, ""),
+                  other: elements[0].substring(7).replace(/-/gi, "")
+                },
+                owner: elements[2],
+                group: elements[3],
+                size: elements[4],
+                modifyTime: mTime,
+                accessTime: mTime,
+                name: elements.slice(8).join(" ")
+              };
+              acc.push(entry);
+              return acc;
+            }, []);
+            resolve(listing);
+          });
+          _self.sftp.write(`ls -l ${path}\r`);
+        } else {
+          reject("No sftp connection");
+        }
+      } catch (err) {
+        reject(err.message);
       }
     });
   }
