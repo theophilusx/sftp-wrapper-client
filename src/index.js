@@ -211,11 +211,13 @@ class Client {
           _self.maybeDebug(`response: resolving promise: ${r}`);
           _self.sftp.removeAllListeners("password");
           _self.sftp.removeAllListeners("response");
-          resolve(true);
+          return resolve(true);
         });
       } catch (err) {
         _self.maybeDebug(`connect catch: ${err.message}`);
-        reject(err.message);
+        _self.sftp.removeAllListeners("response");
+        _self.sftp.removeAllListeners("password");
+        return reject(err.message);
       }
     });
   }
@@ -231,7 +233,12 @@ class Client {
     return new Promise((resolve, reject) => {
       try {
         if (_self.sftp) {
-          _self.sftp.write("exit \n");
+          _self.sftp.removeAllListeners("data");
+          _self.sftp.removeAllListeners("error");
+          _self.sftp.removeAllListeners("exit");
+          _self.sftp.write("exit \r");
+          _self.sftp.destroy();
+          _self.sftp = undefined;
         }
         resolve(true);
       } catch (err) {
@@ -280,14 +287,39 @@ class Client {
               acc.push(entry);
               return acc;
             }, []);
-            resolve(listing);
+            _self.sftp.removeAllListeners("response");
+            return resolve(listing);
           });
           _self.sftp.write(`ls -l ${path}\r`);
         } else {
           reject("No sftp connection");
         }
       } catch (err) {
+        _self.sftp.removeAllListeners("response");
         reject(err.message);
+      }
+    });
+  }
+
+  cwd() {
+    let _self = this;
+
+    return new Promise((resolve, reject) => {
+      try {
+        if (!_self.sftp) {
+          return reject("No sftp connection");
+        }
+        _self.sftp.on("response", res => {
+          _self.maybeDebug(`cwd response: ${JSON.stringify(res, null, " ")}`);
+          let [r] = res.filter(l => l.match(/Remote working directory:/));
+          let dir = r.match(/Remote working directory: (.*)/)[1];
+          _self.sftp.removeAllListeners("response");
+          return resolve(dir);
+        });
+        _self.sftp.write("pwd\r");
+      } catch (err) {
+        _self.sftp.removeAllListeners("response");
+        return reject(err.message);
       }
     });
   }
