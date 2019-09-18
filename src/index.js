@@ -13,10 +13,11 @@
 
 const pty = require("node-pty");
 const moment = require("moment");
+const path = require("path");
 
 const garbage = /No entry for terminal type "sftp";|using dumb terminal settings./gi;
-const prompt = /sftp> $/;
-const pwd = /password: $/;
+const prompt = /^sftp> $/m;
+const pwd = /password: $/m;
 const months = {
   Jan: 1,
   Fed: 2,
@@ -81,7 +82,6 @@ class Client {
     } else {
       this._collector += data;
       if (this._collector.match(prompt)) {
-        this.maybeDebug(`${name}: Got prompt`);
         let newData = this._collector
           .replace(garbage, "")
           .replace(/sftp>/, "")
@@ -91,7 +91,6 @@ class Client {
         this.maybeDebug(
           `${name}: returning ${JSON.stringify(newData, null, " ")}`
         );
-        this.maybeDebug("----");
         this.sftp.emit("response", newData);
       }
     }
@@ -137,19 +136,15 @@ class Client {
           forceIPv6: config.forceIPv6 ? true : false,
           username: config.username,
           password: config.password,
-          compress: config.compress ? true : false
+          compress: config.compress ? true : false,
+          privateKey: config.privateKey ? config.privateKey : undefined
         };
-        if (config.privateKey) {
-          if (config.privateKey instanceof Buffer) {
-            return reject("privateKey must be a string path");
-          }
-          _self.config.privateKey = config.privateKey;
-        }
+
         if (config.debug && typeof config.debug === "function") {
           _self.debug = config.debug;
         }
 
-        _self.maybeDebug(`Config: ${JSON.stringify(config, null, " ")}`);
+        _self.maybeDebug(`Config: ${JSON.stringify(_self.config, null, " ")}`);
 
         let args = ["-q"];
         if (_self.config.port !== 22) {
@@ -173,23 +168,19 @@ class Client {
 
         _self.maybeDebug(`Args: ${JSON.stringify(args)}`);
 
-        let env = process.env;
-        // env.TERM = "xterm";
         _self.sftp = pty.spawn("/usr/bin/sftp", args, {
           name: "sftp",
           cols: 80,
           rows: 30,
           cwd: __dirname,
-          env: env
+          env: process.env
         });
 
         _self.sftp.on("error", err => {
-          _self.maybeDebug(`Error Listener: ${err.message}`);
           throw new Error(err.message);
         });
 
         _self.sftp.on("exit", (code, signal) => {
-          _self.maybeDebug(`exit event: code = ${code} signal: ${signal}`);
           if (code !== 0) {
             //console.error(`sftp client existed with error code ${code}`);
             throw new Error(
@@ -207,17 +198,16 @@ class Client {
           _self.sftp.write(`${_self.config.password}\r`);
         });
 
-        _self.sftp.on("response", r => {
-          _self.maybeDebug(`response: resolving promise: ${r}`);
+        _self.sftp.on("response", () => {
+          _self.maybeDebug("resolving connect promise");
           _self.sftp.removeAllListeners("password");
           _self.sftp.removeAllListeners("response");
-          return resolve(true);
+          resolve(true);
         });
       } catch (err) {
-        _self.maybeDebug(`connect catch: ${err.message}`);
         _self.sftp.removeAllListeners("response");
         _self.sftp.removeAllListeners("password");
-        return reject(err.message);
+        reject(err.message);
       }
     });
   }
@@ -251,48 +241,58 @@ class Client {
    * Returns an array of objects representing the output from ls -l on
    * remote server
    *
-   * @param {string} path - remote path
+   * @param {string} remotePath - remote path
    * @returns {Promise} resolves to array of objects
    */
-  list(path) {
-    let _self = this;
+  list(remotePath) {
+    const _self = this;
     const notFound = /Can't ls: .* not found/;
+
     return new Promise((resolve, reject) => {
       try {
-        if (_self.sftp) {
-          _self.sftp.on("response", res => {
-            if (res.filter(l => l.match(notFound)).length) {
-              return reject(`${path} not found`);
-            }
-            let listing = res.reduce((acc, v) => {
-              if (v.match(/ls -l/)) {
-                return acc;
-              }
-              let elements = v.split(/ +/);
-              let mTime = makeTimestamp(elements[5], elements[6], elements[7]);
-              let entry = {
-                type: elements[0].substring(0, 1),
-                rights: {
-                  user: elements[0].substring(1, 4).replace(/-/gi, ""),
-                  group: elements[0].substring(4, 7).replace(/-/gi, ""),
-                  other: elements[0].substring(7).replace(/-/gi, "")
-                },
-                owner: elements[2],
-                group: elements[3],
-                size: elements[4],
-                modifyTime: mTime,
-                accessTime: mTime,
-                name: elements.slice(8).join(" ")
-              };
-              acc.push(entry);
-              return acc;
-            }, []);
-            _self.sftp.removeAllListeners("response");
-            return resolve(listing);
-          });
-          _self.sftp.write(`ls -l ${path}\r`);
-        } else {
+        let cmd = `ls -l ${remotePath}`;
+        if (!_self.sftp) {
           reject("No sftp connection");
+        } else {
+          _self.sftp.on("response", res => {
+            res = res.filter(l => !l.match(RegExp(`\\w*${cmd}\\w*`)));
+            _self.maybeDebug(
+              `list response: ${JSON.stringify(res, null, " ")}`
+            );
+            if (res.filter(l => l.match(notFound)).length) {
+              reject(`${path} not found`);
+            } else {
+              let listing = res.reduce((acc, v) => {
+                let elements = v.split(/ +/);
+                if (elements.length >= 9) {
+                  let mTime = makeTimestamp(
+                    elements[5],
+                    elements[6],
+                    elements[7]
+                  );
+                  let entry = {
+                    type: elements[0].substring(0, 1),
+                    rights: {
+                      user: elements[0].substring(1, 4).replace(/-/gi, ""),
+                      group: elements[0].substring(4, 7).replace(/-/gi, ""),
+                      other: elements[0].substring(7).replace(/-/gi, "")
+                    },
+                    owner: elements[2],
+                    group: elements[3],
+                    size: elements[4],
+                    modifyTime: mTime,
+                    accessTime: mTime,
+                    name: elements.slice(8).join(" ")
+                  };
+                  acc.push(entry);
+                }
+                return acc;
+              }, []);
+              _self.sftp.removeAllListeners("response");
+              resolve(listing);
+            }
+          });
+          _self.sftp.write(`${cmd}\r`);
         }
       } catch (err) {
         _self.sftp.removeAllListeners("response");
@@ -306,20 +306,58 @@ class Client {
 
     return new Promise((resolve, reject) => {
       try {
+        let cmd = "pwd";
         if (!_self.sftp) {
-          return reject("No sftp connection");
+          reject("No sftp connection");
+        } else {
+          _self.sftp.on("response", res => {
+            res = res.filter(l => !l.match(RegExp(`\\w*${cmd}\\w*`)));
+            _self.maybeDebug(`cwd response: ${JSON.stringify(res, null, " ")}`);
+            let [r] = res.filter(l => l.match(/Remote working directory:/));
+            let dir = r.match(/Remote working directory: (.*)/)[1];
+            _self.sftp.removeAllListeners("response");
+            resolve(dir);
+          });
+          _self.sftp.write("pwd\r");
         }
-        _self.sftp.on("response", res => {
-          _self.maybeDebug(`cwd response: ${JSON.stringify(res, null, " ")}`);
-          let [r] = res.filter(l => l.match(/Remote working directory:/));
-          let dir = r.match(/Remote working directory: (.*)/)[1];
-          _self.sftp.removeAllListeners("response");
-          return resolve(dir);
-        });
-        _self.sftp.write("pwd\r");
       } catch (err) {
         _self.sftp.removeAllListeners("response");
-        return reject(err.message);
+        reject(err.message);
+      }
+    });
+  }
+
+  exists(remotePath) {
+    const _self = this;
+    const notFound = /Can't ls: .* not found/;
+
+    return new Promise((resolve, reject) => {
+      try {
+        let {dir, base} = path.parse(remotePath);
+        let cmd = `ls -l ${dir}`;
+        if (!_self.sftp) {
+          reject("No sftp connection");
+        } else {
+          _self.sftp.on("response", res => {
+            res = res.filter(l => !l.match(RegExp(`\\w*${cmd}\\w*`)));
+            if (res.filter(l => l.match(notFound)).length) {
+              _self.sftp.removeAllListeners("response");
+              return resolve(false);
+            }
+            for (let l of res) {
+              if (l.match(RegExp(`\\.*${base}$`))) {
+                _self.sftp.removeAllListeners("response");
+                return resolve(l.substring(0, 1));
+              }
+            }
+            _self.sftp.removeAllListeners("response");
+            return resolve(false);
+          });
+          _self.sftp.write(`${cmd}\r`);
+        }
+      } catch (err) {
+        _self.sftp.removeAllListeners("response");
+        reject(err.message);
       }
     });
   }
