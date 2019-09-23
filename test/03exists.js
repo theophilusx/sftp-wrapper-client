@@ -20,10 +20,10 @@ describe("#exists() tests", function() {
   let config = {
     host: process.env.SFTP_SERVER,
     username: process.env.SFTP_USER,
-    password: process.env.SFTP_PASSWORD,
-    debug: s => {
-      console.log(`DEBUG: ${s}`);
-    }
+    password: process.env.SFTP_PASSWORD
+    // debug: s => {
+    //   console.log(`DEBUG: ${s}`);
+    // }
   };
 
   before("exists() setup hook", async function() {
@@ -36,10 +36,10 @@ describe("#exists() tests", function() {
   });
 
   it("#exists() returns a promise", function() {
-    return expect(client.exists()).to.be.a("promise");
+    return expect(client.exists("/home/tim")).to.be.a("promise");
   });
 
-  it("#exists() returns true for existing dir", function() {
+  it("#exists() returns d for existing dir", function() {
     return expect(client.exists("/home/tim/testServer")).to.eventually.equal(
       "d"
     );
