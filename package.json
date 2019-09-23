@@ -16,7 +16,7 @@
   "keywords": [],
   "author": "Tim Cross",
   "email": "theophilusx@gmail.com",
-  "license": "GPLv3",
+  "license": "GPL-3.0-or-later",
   "bugs": {
     "url": "https://github.com/theophilusx/sftp-wrapper-client/issues"
   },
